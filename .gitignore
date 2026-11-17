@@ -1,0 +1,31 @@
+# ── 급여/개인정보는 어떤 경우에도 커밋 금지 (public repo 전제) ──
+data/raw/
+data/*.json
+급여명세서/
+사진/
+*.eml
+*.pdf
+*.png
+*.jpg
+.env
+secrets.json
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+node_modules/
+.DS_Store
+명세서위치.txt
+*링크*
+data/raw/html/
+data/raw/links.json
+web/data.json
+config.json
+
+# 아이콘만은 올린다 (그 외 이미지는 위에서 막혀 있다)
+!docs/*.png
+!docs/*.svg
+
+# 내가 보려고 두는 문서·PDF (공개 저장소에 안 올린다)
+자료/

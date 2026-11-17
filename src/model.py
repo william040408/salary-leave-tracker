@@ -1,0 +1,95 @@
+# -*- coding: utf-8 -*-
+"""급여 검산 + 연차 계산 모델."""
+from datetime import date
+from dateutil.relativedelta import relativedelta  # noqa
+
+# 계약 조건은 전부 config.json 에서 온다 (명세서에서 역산해 확정한 값들)
+from config import (HOURLY, MONTHLY_HOURS, DAILY_HOURS, FULL_BASE, DAY_PAY,
+                    FIXED_ALLOWANCES, EI_RATE, CFG)
+
+HIRE_DATE = date.fromisoformat(CFG["hireDate"])
+
+
+def _round10_down(x):
+    return int(x) // 10 * 10
+
+
+def verify(ps):
+    """명세서 한 장의 산술 검증. 발견된 이상을 리스트로 반환."""
+    issues, notes = [], []
+    e, d, t = ps["earnings"], ps["deductions"], ps["totals"]
+
+    # 1) 기본급 -> 차감 시간 역산. 반차(4h) 사용이 있으므로 '일' 단위로 가정하지 않는다.
+    base = e.get("기본급", 0)
+    shortfall = FULL_BASE - base
+    if (shortfall * 2) % HOURLY == 0:          # 30분 단위까지 인정 (지각·반차 반영)
+        q = shortfall * 2 // HOURLY / 2
+        ps["deducted_hours"] = int(q) if q == int(q) else q
+    else:
+        ps["deducted_hours"] = None
+        issues.append(
+            f"기본급 {base:,}원이 시급({HOURLY:,}원) 단위로 안 떨어짐 "
+            f"(만근 {FULL_BASE:,} 대비 {shortfall:,} 차이)"
+        )
+    h = ps["deducted_hours"]
+    # 4시간 단위가 아니면 지각·조퇴가 섞인 것 — 이상이 아니라 참고 사항이다
+    if h is not None and h % 4 != 0:
+        notes.append(f"차감 {h}시간 — 4시간 단위가 아님 (지각·조퇴 반영으로 보임)")
+    ps["leave_used"] = h / DAILY_HOURS if h is not None else None
+
+    # 2) 연차수당 -> 현금 지급받은 연차일수
+    ann = e.get("연차수당", 0)
+    ps["leave_cashed"] = ann // DAY_PAY if ann % DAY_PAY == 0 else None
+    if ann and ps["leave_cashed"] is None:
+        issues.append(f"연차수당 {ann:,}원이 1일치({DAY_PAY:,}원)의 배수가 아님")
+
+    # 3) 고정수당
+    for k, v in FIXED_ALLOWANCES.items():
+        got = e.get(k)
+        if got is None:
+            issues.append(f"{k} 항목이 없음 (평소 {v:,}원)")
+        elif got != v:
+            issues.append(f"{k} {got:,}원 — 평소 {v:,}원과 다름")
+
+    # 4) 지급총액 = 항목 합계
+    gross = t["지급총액"]
+
+    # 5) 공제 검산
+    ded_sum = sum(d.values())
+    if t.get("공제총액") is not None and ded_sum != t["공제총액"]:
+        issues.append(f"공제 항목 합 {ded_sum:,} != 공제총액 {t['공제총액']:,}")
+
+    exp_ei = _round10_down(gross * EI_RATE)
+    if abs(d.get("고용보험", 0) - exp_ei) > 10:
+        issues.append(f"고용보험 {d.get('고용보험',0):,} — 지급총액의 0.9%는 {exp_ei:,}")
+
+    exp_local = _round10_down(d.get("소득세", 0) * 0.1)
+    if abs(d.get("주민세", 0) - exp_local) > 10:
+        issues.append(f"주민세 {d.get('주민세',0):,} — 소득세의 10%는 {exp_local:,}")
+
+    # 6) 실지급액
+    net = gross - ded_sum
+    ps["computed_net"] = net
+    if t.get("실지급액") is not None and t["실지급액"] != net:
+        issues.append(f"실지급액 {t['실지급액']:,} != 지급총액-공제 {net:,}")
+    elif t.get("실지급액") is None:
+        notes.append(f"명세서에 실지급액 표기 없음 — 계산값 {net:,}원")
+
+    ps["issues"], ps["notes"] = issues, notes
+    return ps
+
+
+def accrued_leave(hire, asof):
+    """근로기준법 연차 발생. 1년 미만은 1개월 개근당 1일(최대 11일),
+    1년 시점에 15일 일괄 발생."""
+    if asof < hire:
+        return 0
+    months = (asof.year - hire.year) * 12 + (asof.month - hire.month)
+    if asof.day < hire.day:
+        months -= 1
+    if months < 12:
+        return max(0, min(11, months))
+    years = months // 12
+    extra = min(11, 11)  # 1년차에 쌓인 월차 11일은 별도 유지
+    annual = 15 + max(0, (years - 1) // 2)  # 3년차부터 2년마다 +1
+    return extra + annual

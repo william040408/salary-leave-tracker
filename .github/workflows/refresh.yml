@@ -1,0 +1,86 @@
+name: 명세서 불러오기
+
+# 웹 버튼이 Worker 를 거쳐 이 작업을 깨운다. 손으로도 돌릴 수 있게
+# Actions 탭의 Run workflow 버튼을 남겨 둔다.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 파이썬 패키지 설치
+        run: pip install -r requirements.txt
+
+      # 크롬 엔진은 150MB 라 매번 받으면 1분 넘게 걸린다. 캐시해 둔다.
+      - name: 크롬 엔진 캐시
+        id: browser-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: 크롬 엔진 내려받기
+        if: steps.browser-cache.outputs.cache-hit != 'true'
+        run: python -m playwright install --with-deps chromium
+
+      - name: 크롬 엔진 준비 (캐시 적중)
+        if: steps.browser-cache.outputs.cache-hit == 'true'
+        run: python -m playwright install-deps chromium
+
+      - name: 자격 증명 준비
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_PASS: ${{ secrets.WORKER_PASS }}
+        run: |
+          umask 077
+          {
+            echo "GMAIL_USER=$GMAIL_USER"
+            echo "GMAIL_APP_PASSWORD=$GMAIL_APP_PASSWORD"
+            echo "WORKER_URL=$WORKER_URL"
+            echo "WORKER_PASS=$WORKER_PASS"
+          } > .env
+
+      - name: 금고에서 설정 받아오기
+        env:
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_PASS: ${{ secrets.WORKER_PASS }}
+        run: |
+          code=$(curl -sS -o config.json -w '%{http_code}'                  -H "x-pass: $WORKER_PASS" "${WORKER_URL%/}/config")
+          if [ "$code" != "200" ] || ! python -c "import json;json.load(open('config.json',encoding='utf-8'))"; then
+            echo "[!] 금고에서 설정을 못 받았습니다 (HTTP $code)." >&2
+            echo "    노트북에서 python src/push_data.py 를 한 번 돌려 설정을 올려 주세요." >&2
+            exit 1
+          fi
+          echo "설정 받음"
+
+      - name: 메일에서 명세서 링크 찾기
+        run: python src/fetch.py links
+
+      - name: 명세서 받아오기
+        run: python src/fetch_doc.py
+
+      - name: 검산
+        run: python src/report.py
+
+      - name: 금고에 올리기
+        run: python src/push_data.py
+
+      - name: 뒷정리
+        if: always()
+        run: rm -f .env config.json
